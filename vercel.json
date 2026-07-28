@@ -1,20 +1,7 @@
 {
   "version": 2,
-  "name": "key-xyr-api",
-  "builds": [
-    {
-      "src": "api/games/mobile-legends.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/api/games/mobile-legends",
-      "dest": "/api/games/mobile-legends.js"
-    },
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/games/mobile-legends.js"
-    }
-  ]
+  "functions": {
+    "api/connect.js": { "maxDuration": 10 },
+    "api/generate-key.js": { "maxDuration": 10 }
+  }
 }
