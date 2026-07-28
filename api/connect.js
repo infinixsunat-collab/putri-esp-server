@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -10,6 +10,10 @@ const SALT = process.env.SALT_SECRET || 'Vm8Lk7Uj2JmsjCPVPVjrLa7zgfx3uz9E';
 
 function md5(data) {
   return createHash('md5').update(data).digest('hex');
+}
+
+function hmacMD5(key, data) {
+  return createHmac('md5', key).update(data).digest('hex');
 }
 
 const CORS_HEADERS = {
@@ -27,10 +31,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { game, user_key, serial } = req.body;
+    const { game, user_key, serial, hmac } = req.body;
 
-    if (!user_key || !serial) {
+    if (!user_key || !serial || !hmac) {
       return res.status(200).json({ status: false, reason: 'Missing required fields' });
+    }
+
+    // --- HMAC VERIFICATION (two-way auth) ---
+    // Client must prove it knows the salt by signing (user_key + serial)
+    const expectedHmac = hmacMD5(SALT, user_key + serial);
+    if (hmac !== expectedHmac) {
+      await logAttempt(supabase, user_key, serial, false, 'Invalid HMAC', req);
+      return res.status(200).json({ status: false, reason: 'Invalid HMAC' });
     }
 
     // Cari key
@@ -95,12 +107,15 @@ export default async function handler(req, res) {
     const token = md5(authString);
     const rng = Math.floor(Date.now() / 1000);
 
+    // Generate server HMAC so client can verify the response is from us
+    const serverHmac = hmacMD5(SALT, token + rng.toString());
+
     // Log sukses
     await logAttempt(supabase, user_key, serial, true, 'OK', req);
 
     return res.status(200).json({
       status: true,
-      data: { token, rng }
+      data: { token, rng, hmac: serverHmac }
     });
 
   } catch (err) {
