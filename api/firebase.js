@@ -13,53 +13,40 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-// ── DEVICE FINGERPRINT ──────────────────────────────────
-function getDeviceId(pathParts) {
-  // Path: /firebase/keys/<keyName>/devices/<devId>.json
-  // We need devId which is the 5th segment (index 4)
-  if (pathParts.length >= 5 && pathParts[3] === 'devices') {
-    return pathParts[4].replace(/\.json$/i, '');
-  }
-  return null;
-}
-
-function getKeyName(pathParts) {
-  // Path: /firebase/keys/<keyName>/...
-  if (pathParts.length >= 2) {
-    return pathParts[1];
-  }
-  return null;
-}
-
-function getSubPath(pathParts) {
-  // Path: /firebase/keys/<keyName>/<subPath>.json
-  if (pathParts.length >= 3) {
-    return pathParts[2].replace(/\.json$/i, '');
-  }
-  return null;
-}
-
-// ── PARSE REQUEST URL ───────────────────────────────────
-function parseRequest(url) {
-  // Expected formats:
-  //   GET  /firebase/keys.json
-  //   GET  /firebase/keys/<keyName>/devices.json
-  //   PUT  /firebase/keys/<keyName>/devices/<devId>.json
-  const cleanPath = url.replace(/\/+$/, '');
-  const parts = cleanPath.split('/');
+// ── PARSE REQUEST PATH ─────────────────────────────────
+// Vercel rewrites /keys.json → /api/firebase
+// After rewrite, req.url still contains the original path
+// Examples:
+//   /keys.json
+//   /keys/NXE-FREE/devices.json
+//   /keys/NXE-FREE/devices/DEVICE_ID.json
+//   /bannedDevices/KDF_ID.json
+function parseFirebasePath(url) {
+  // Remove query string
+  const path = url.split('?')[0];
   
-  // parts[0] = '' (empty before first /)
-  // parts[1] = 'firebase'
-  // parts[2] = 'keys'
-  // parts[3] = keyName (or null for /keys.json)
-  // parts[4] = subPath (devices, bannedDevices, etc.)
-  // parts[5] = deviceId (or null)
-  
-  if (parts[1] !== 'firebase' || parts[2] !== 'keys') {
-    return null;
+  // /keys.json
+  if (path === '/keys.json') {
+    return { type: 'keys_list' };
   }
   
-  return parts;
+  // /keys/<keyName>/devices.json or /keys/<keyName>/devices/<devId>.json
+  const keysMatch = path.match(/^\/keys\/([^\/]+)\/devices(?:\/([^\/]+))?\.json$/);
+  if (keysMatch) {
+    return {
+      type: keysMatch[2] ? 'device_register' : 'device_list',
+      keyName: keysMatch[1],
+      devId: keysMatch[2] || null
+    };
+  }
+  
+  // /bannedDevices/<kdfId>.json
+  const banMatch = path.match(/^\/bannedDevices\/([^\/]+)\.json$/);
+  if (banMatch) {
+    return { type: 'banned_check', kdfId: banMatch[1] };
+  }
+  
+  return null;
 }
 
 // ── MAIN HANDLER ────────────────────────────────────────
@@ -72,45 +59,30 @@ export default async function handler(req, res) {
   }
 
   try {
-    const pathParts = parseRequest(req.url);
-    if (!pathParts) {
-      return res.status(400).json({ error: 'Invalid path' });
+    const parsed = parseFirebasePath(req.url);
+    if (!parsed) {
+      return res.status(404).json({ error: 'Not found: ' + req.url });
     }
 
     // ── GET /keys.json ──────────────────────────────────────
-    // Returns all keys with their metadata
-    if (pathParts.length === 3) {
-      // Fetch all key pairs from user_keys table
+    if (parsed.type === 'keys_list') {
       const { data: keys, error } = await supabase
         .from('user_keys')
-        .select('key_value, max_devices, is_active, created_at')
+        .select('*')
         .eq('is_active', true);
 
       if (error) {
-        console.error('DB error:', error);
         return res.status(200).json({});
       }
 
-      // Build Firebase-compatible response
       const result = {};
       for (const k of keys || []) {
-        const keyName = k.key_value;
-        
-        // Get registered devices for this key
-        const { data: keyData } = await supabase
-          .from('user_keys')
-          .select('registered_serials')
-          .eq('key_value', keyName)
-          .single();
-        
         const devices = {};
-        if (keyData?.registered_serials) {
-          for (const devId of keyData.registered_serials) {
-            devices[devId] = true;
-          }
+        for (const devId of (k.registered_serials || [])) {
+          devices[devId] = true;
         }
 
-        result[keyName] = {
+        result[k.key_value] = {
           type: 'FREE',
           status: 'KOSKESHA',
           startDate: new Date(k.created_at).toISOString().split('T')[0],
@@ -124,60 +96,48 @@ export default async function handler(req, res) {
     }
 
     // ── GET /keys/<keyName>/devices.json ────────────────────
-    if (pathParts.length === 4 && getSubPath(pathParts) === 'devices') {
-      const keyName = getKeyName(pathParts);
-      
-      const { data: keyData, error } = await supabase
+    if (parsed.type === 'device_list') {
+      const { data: keyData } = await supabase
         .from('user_keys')
         .select('registered_serials')
-        .eq('key_value', keyName)
+        .eq('key_value', parsed.keyName)
         .single();
 
-      if (error || !keyData) {
-        return res.status(200).json({});
-      }
-
       const devices = {};
-      for (const devId of (keyData.registered_serials || [])) {
+      for (const devId of (keyData?.registered_serials || [])) {
         devices[devId] = true;
       }
-
       return res.status(200).json(devices);
     }
 
     // ── PUT /keys/<keyName>/devices/<devId>.json ────────────
-    if (pathParts.length === 5 && pathParts[3] === 'devices') {
-      const keyName = getKeyName(pathParts);
-      const devId = pathParts[4].replace(/\.json$/i, '');
-      
+    if (parsed.type === 'device_register') {
       if (req.method !== 'PUT') {
-        return res.status(405).json({ error: 'Use PUT' });
+        return res.status(405).json({ error: 'Method not allowed' });
       }
 
-      // Get current key data
-      const { data: keyData, error: fetchError } = await supabase
+      const { data: keyData, error } = await supabase
         .from('user_keys')
         .select('*')
-        .eq('key_value', keyName)
+        .eq('key_value', parsed.keyName)
         .single();
 
-      if (fetchError || !keyData) {
-        return res.status(200).json({ error: 'Key not found' });
+      if (error || !keyData) {
+        return res.status(200).json(false);
       }
 
       if (!keyData.is_active) {
-        return res.status(200).json({ error: 'Key inactive' });
+        return res.status(200).json(false);
       }
 
       const serials = keyData.registered_serials || [];
       
-      // Don't add if already exists
-      if (!serials.includes(devId)) {
+      if (!serials.includes(parsed.devId)) {
         if (serials.length >= keyData.max_devices) {
-          return res.status(200).json({ error: 'Device limit reached' });
+          return res.status(200).json(false);
         }
         
-        serials.push(devId);
+        serials.push(parsed.devId);
         await supabase
           .from('user_keys')
           .update({
@@ -189,17 +149,15 @@ export default async function handler(req, res) {
           .eq('id', keyData.id);
       }
 
-      // Firebase returns the value that was PUT (true)
       return res.status(200).json(true);
     }
 
-    // ── GET /keys/<keyName>/bannedDevices/<kdfId>.json ─────
-    if (pathParts.length === 5 && pathParts[3] === 'bannedDevices') {
-      // No banned devices
+    // ── GET /bannedDevices/<kdfId>.json ─────────────────────
+    if (parsed.type === 'banned_check') {
       return res.status(200).json(null);
     }
 
-    return res.status(404).json({ error: 'Not found' });
+    return res.status(404).json({ error: 'Unhandled path' });
 
   } catch (err) {
     console.error('Firebase handler error:', err);
