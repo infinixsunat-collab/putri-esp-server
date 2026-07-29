@@ -2,6 +2,12 @@
   "version": 2,
   "functions": {
     "api/connect.js": { "maxDuration": 10 },
-    "api/generate-key.js": { "maxDuration": 10 }
-  }
+    "api/generate-key.js": { "maxDuration": 10 },
+    "api/firebase.js": { "maxDuration": 10 }
+  },
+  "routes": [
+    { "src": "/keys\\.json", "dest": "/api/firebase" },
+    { "src": "/keys/(.*)", "dest": "/api/firebase" },
+    { "src": "/bannedDevices/(.*)", "dest": "/api/firebase" }
+  ]
 }
